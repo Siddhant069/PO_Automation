@@ -4,3 +4,4 @@ secrets/
 venv/
 .env
 *.db
+create_secrets.ps1

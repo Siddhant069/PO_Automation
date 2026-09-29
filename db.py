@@ -296,6 +296,30 @@ def get_all_po_logs(status_filter: Optional[str] = None) -> list[dict]:
         conn.close()
 
 
+def get_po_items_for_export(po_nos: list[str]) -> list[dict]:
+    """Returns flipkart_po_items rows for the given POs, joined with their flipkart_po_logs header."""
+    if not po_nos:
+        return []
+    placeholders = ", ".join(["%s"] * len(po_nos))
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(f"""
+                SELECT
+                    i.po_no AS po_id, l.po_date AS order_date, l.supplier_name, l.to_site_name, l.status,
+                    i.order_item_id, i.fsn, i.ean, i.product_title, i.brand, i.vertical, i.hsn,
+                    i.quantity, i.pending_quantity, i.unit_price, i.mrp, i.tax_percent,
+                    i.tax_amount, i.cgst_amount, i.sgst_amount, i.igst_amount
+                FROM flipkart_po_items i
+                LEFT JOIN flipkart_po_logs l ON l.po_no = i.po_no
+                WHERE i.po_no IN ({placeholders})
+                ORDER BY i.po_no, i.id
+            """, tuple(po_nos))
+            return cursor.fetchall()
+    finally:
+        conn.close()
+
+
 def get_b2b_connection():
     """Returns a PyMySQL connection for 'B2B_Automation' database."""
     cfg = config.DB_CONFIG.copy()
@@ -319,11 +343,17 @@ def init_b2b_db() -> None:
         log.warning("Could not auto-create B2B_Automation DB: %s", e)
 
 
-def save_pdf_base64_payload(po_id: str, payload_dict: dict) -> bool:
-    """Saves transformed PO payload into B2B_Automation.PDF_Base64 table."""
-    import json as _json
+def save_pdf_base64_payload(po_id: str, payload_dict: dict, file_name: str, file_bytes: bytes) -> bool:
+    """Saves the VendorHub PO Excel into B2B_Automation.PDF_Base64 for the parser.
+
+    Base64Encoded / csv_base64 hold the Excel file and ValidatedOutput is left NULL:
+    the downstream parser builds ValidatedOutput from the file (it includes the
+    ship-to pincode, which the VendorHub API response lacks). payload_dict only
+    supplies the header columns (VendorGST, PO date, expiry date).
+    """
+    import base64
     init_b2b_db()
-    validated_output_json = _json.dumps(payload_dict, ensure_ascii=False)
+    file_b64 = base64.b64encode(file_bytes).decode("ascii")
     vendor_gst = payload_dict.get("vendor_gst") or ""
     po_date = payload_dict.get("purchase_order_date") or ""
     expiry_date = payload_dict.get("purchase_order_expiry_date") or ""
@@ -331,8 +361,14 @@ def save_pdf_base64_payload(po_id: str, payload_dict: dict) -> bool:
     conn = get_b2b_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT ID FROM PDF_Base64 WHERE csv_filename = %s OR PONumber = %s OR Filename = %s", (po_id, po_id, po_id))
+            cursor.execute("SELECT ID, Status, OrderStatus FROM PDF_Base64 WHERE csv_filename = %s OR PONumber = %s OR Filename = %s", (file_name, po_id, file_name))
             existing = cursor.fetchone()
+
+            if existing and "COMPLETED" in (existing["Status"], existing["OrderStatus"]):
+                # Already parsed / ordered downstream: resetting it to PENDING would re-run the order
+                log.info("PO %s already processed in PDF_Base64 (ID %s, Status=%s, OrderStatus=%s) — leaving it unchanged.",
+                         po_id, existing["ID"], existing["Status"], existing["OrderStatus"])
+                return True
 
             if existing:
                 cursor.execute("""
@@ -341,22 +377,24 @@ def save_pdf_base64_payload(po_id: str, payload_dict: dict) -> bool:
                         Filename = %s,
                         csv_filename = %s,
                         Status = %s,
-                        ValidatedOutput = %s,
+                        Base64Encoded = %s,
+                        csv_base64 = %s,
+                        ValidatedOutput = NULL,
                         VendorGST = %s,
                         PONumber = %s,
                         PurchaseOrderDate = %s,
                         PurchaseOrderExpiryDate = %s
                     WHERE ID = %s
-                """, ('Flipkart OR', po_id, po_id, 'PENDING', validated_output_json, vendor_gst, po_id, po_date, expiry_date, existing['ID']))
+                """, ('Flipkart OR', file_name, file_name, 'PENDING', file_b64, file_b64, vendor_gst, po_id, po_date, expiry_date, existing['ID']))
             else:
                 cursor.execute("""
                     INSERT INTO PDF_Base64 (
-                        ChannelName, Filename, csv_filename, Status, ValidatedOutput,
+                        ChannelName, Filename, csv_filename, Status, Base64Encoded, csv_base64,
                         VendorGST, PONumber, PurchaseOrderDate, PurchaseOrderExpiryDate
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, ('Flipkart OR', po_id, po_id, 'PENDING', validated_output_json, vendor_gst, po_id, po_date, expiry_date))
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, ('Flipkart OR', file_name, file_name, 'PENDING', file_b64, file_b64, vendor_gst, po_id, po_date, expiry_date))
         conn.commit()
-        log.info("Saved PO %s validated output payload to 'B2B_Automation.PDF_Base64' table.", po_id)
+        log.info("Saved PO %s Excel (%s) as Base64 to 'B2B_Automation.PDF_Base64' table.", po_id, file_name)
         return True
     except Exception as e:
         log.error("Failed to save B2B_Automation.PDF_Base64 record for PO %s: %s", po_id, e)

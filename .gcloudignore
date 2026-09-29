@@ -1,0 +1,8 @@
+# Files not uploaded to Cloud Build by `gcloud builds submit`
+.gcloudignore
+.git
+#!include:.gitignore
+create_secrets.ps1
+deploy.sh
+*.png
+*.md

@@ -84,8 +84,8 @@ def main():
                 latest_max = db.get_max_po_date()
                 print(f"  [DB flipkart_po_logs] Saved {len(po_list)} PO logs ({new_count} new). MAX(po_date): {latest_max}\n")
 
-            # If --all-db is passed or if step 2 finds no new pending POs, fetch POs from flipkart_po_logs
-            if args.all_db or not po_list:
+            # Only re-process POs from flipkart_po_logs when explicitly asked via --all-db
+            if args.all_db:
                 print("\n  [DB Query] Loading PO records directly from 'flipkart_po_logs' database table...")
                 db_records = db.get_all_po_logs()
                 if db_records:
@@ -113,7 +113,7 @@ def main():
                         ))
 
             if not po_list:
-                print("  No POs found in DB or API. Exiting.\n")
+                print("  No new POs fetched. Sending notification and exiting.\n")
                 ctx.browser.close()
                 mailer.send_success_mail([])
                 sys.exit(0)
@@ -135,7 +135,8 @@ def main():
                     rec = cursor.fetchone()
                     if rec:
                         import json as _json
-                        val_out = _json.loads(rec.get("ValidatedOutput") or "{}")
+                        # ValidatedOutput is filled later by the parser; until then use this run's payload
+                        val_out = _json.loads(rec.get("ValidatedOutput") or "{}") or step3_res["payloads"].get(po_id, {})
                         po_summary_for_mailer.append({
                             "po_id": po_id,
                             "po_date": rec.get("PurchaseOrderDate") or val_out.get("purchase_order_date") or "",
@@ -149,8 +150,12 @@ def main():
 
         # ── Send Success Email Notification ──────────────────────────────
         current_step = "Sending Success Email Notification"
-        print("\n[Mailer] Sending SUCCESS notification email...")
-        mailer.send_success_mail(po_summary_for_mailer)
+        print(f"\n[Mailer] Sending SUCCESS notification email with {len(step3_res['attachments'])} attachment(s)...")
+        mailer.send_success_mail(
+            po_summary_for_mailer,
+            attachments=step3_res["attachments"],
+            notes=step3_res["notes"],
+        )
 
         print("\n  Pipeline complete.\n")
 

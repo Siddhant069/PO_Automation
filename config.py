@@ -25,7 +25,10 @@ CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 SCOPE = os.getenv("SCOPE", "https://graph.microsoft.com/.default")
 MAILBOX_USER = os.getenv("MAILBOX_USER", "")
-NOTIFICATION_EMAIL = os.getenv("NOTIFICATION_EMAIL", "siddhant.pardhe@glidebrands.in")
+NOTIFICATION_EMAIL = os.getenv(
+    "NOTIFICATION_EMAIL",
+    "siddhant.pardhe@glidebrands.in,Shahana@glidebrands.in,Rahul@glidebrands.in,Akash.Jaiswar@glidebrands.in",
+)
 
 DB_CONFIG = dict(
     host=os.getenv("DB_HOST", "holistique-middleware.c9wdjmzy25ra.ap-south-1.rds.amazonaws.com"),

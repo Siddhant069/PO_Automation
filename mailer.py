@@ -2,13 +2,57 @@
 
 Sends HTML emails for workflow SUCCESS and FAILURE to configured recipients.
 """
+import base64
+import html
+import io
 import logging
+import mimetypes
+import zipfile
+from datetime import datetime
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 
 import config
 
 log = logging.getLogger(__name__)
+
+Attachment = Tuple[str, bytes]  # (filename, file bytes)
+
+# Graph's sendMail request is capped at ~4 MB; base64 inflates attachments by 4/3.
+MAX_ATTACHMENT_BYTES = int(2.8 * 1024 * 1024)
+
+
+def _fit_attachments(attachments: List[Attachment]) -> Tuple[List[Attachment], Optional[str]]:
+    """Keeps attachments under the Graph size limit: zips them if too large, drops them if still too large.
+
+    Returns (attachments to send, note for the email body or None).
+    """
+    total = sum(len(data) for _, data in attachments)
+    if total <= MAX_ATTACHMENT_BYTES:
+        return attachments, None
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in attachments:
+            zf.writestr(name, data)
+    zipped = buffer.getvalue()
+    if len(zipped) <= MAX_ATTACHMENT_BYTES:
+        log.info("Attachments total %d bytes — sending as one zip (%d bytes).", total, len(zipped))
+        zip_name = f"Flipkart_POs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        return [(zip_name, zipped)], None
+
+    log.error("Attachments too large to email even zipped (%d bytes) — sending without them.", len(zipped))
+    return [], f"Attachments ({len(attachments)} file(s), {total / 1024 / 1024:.1f} MB) were too large to email and were not attached."
+
+
+def _graph_file_attachment(name: str, data: bytes) -> dict:
+    content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": name,
+        "contentType": content_type,
+        "contentBytes": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def get_graph_access_token() -> str:
@@ -34,8 +78,9 @@ def get_graph_access_token() -> str:
     return token_data["access_token"]
 
 
-def send_email(subject: str, body_html: str, recipient_email: str = "") -> bool:
-    """Sends an email via Microsoft Graph sendMail API."""
+def send_email(subject: str, body_html: str, recipient_email: str = "",
+               attachments: Optional[List[Attachment]] = None) -> bool:
+    """Sends an email via Microsoft Graph sendMail API, with optional (filename, bytes) attachments."""
     recipient = recipient_email or config.NOTIFICATION_EMAIL
     mailbox = config.MAILBOX_USER or "AI@holistique.in"
 
@@ -70,9 +115,14 @@ def send_email(subject: str, body_html: str, recipient_email: str = "") -> bool:
             },
             "saveToSentItems": "true",
         }
+        if attachments:
+            mail_payload["message"]["attachments"] = [
+                _graph_file_attachment(name, data) for name, data in attachments
+            ]
 
-        log.info("Sending email via MS Graph to %s with subject '%s'...", recipient, subject)
-        resp = requests.post(send_url, headers=headers, json=mail_payload, timeout=30)
+        log.info("Sending email via MS Graph to %s with subject '%s' (%d attachment(s))...",
+                 recipient, subject, len(attachments or []))
+        resp = requests.post(send_url, headers=headers, json=mail_payload, timeout=60)
 
         if resp.status_code in (200, 202):
             log.info("Email sent successfully!")
@@ -85,9 +135,19 @@ def send_email(subject: str, body_html: str, recipient_email: str = "") -> bool:
         return False
 
 
-def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: str = "") -> bool:
-    """Sends SUCCESS email with detailed PO summary table."""
+def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: str = "",
+                      attachments: Optional[List[Attachment]] = None,
+                      notes: Optional[List[str]] = None) -> bool:
+    """Sends SUCCESS email with detailed PO summary table.
+
+    attachments: (filename, bytes) files to attach (PO copies, line-items Excel).
+    notes: warnings shown in the body, e.g. a PO copy that could not be downloaded.
+    """
     subject = "SUCCESS - Flipkart PO"
+    notes = list(notes or [])
+    attachments, size_note = _fit_attachments(list(attachments or []))
+    if size_note:
+        notes.append(size_note)
 
     total_pos = len(po_details_list)
     
@@ -121,12 +181,23 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
         </tr>
         """
 
+    intro_html = "All target Purchase Orders have been acknowledged, processed, and details have been logged into the database tables (<code>flipkart_po_logs</code> and <code>B2B_Automation.PDF_Base64</code>)."
+
     if not table_rows_html:
+        intro_html = "No new Purchase Orders were fetched from Flipkart VendorHub in this run, so no action was taken."
         table_rows_html = """
         <tr>
             <td colspan="6" style="padding: 15px; text-align: center; color: #64748B;">No new pending POs were found in this run.</td>
         </tr>
         """
+
+    extras_html = ""
+    if attachments:
+        names = "".join(f"<li>{html.escape(name)}</li>" for name, _ in attachments)
+        extras_html += f'<p style="margin-top: 20px;"><b>Attached files:</b></p><ul>{names}</ul>'
+    if notes:
+        items = "".join(f"<li>{html.escape(n)}</li>" for n in notes)
+        extras_html += f'<p style="margin-top: 20px; color: #92400E;"><b>Notes:</b></p><ul style="color: #92400E;">{items}</ul>'
 
     body_html = f"""
     <!DOCTYPE html>
@@ -153,7 +224,7 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
             <div class="content">
                 <div class="badge">STATUS: SUCCESS</div>
                 <p>Hello,</p>
-                <p>The <b>Flipkart PO Workflow</b> ran successfully. All target Purchase Orders have been acknowledged, processed, and details have been logged into the database tables (<code>flipkart_po_logs</code> and <code>B2B_Automation.PDF_Base64</code>).</p>
+                <p>The <b>Flipkart PO Workflow</b> ran successfully. {intro_html}</p>
                 
                 <h3 style="margin-top: 24px; color: #1E3A8A;">Processed PO Details ({total_pos} POs)</h3>
                 <table>
@@ -171,6 +242,7 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
                         {table_rows_html}
                     </tbody>
                 </table>
+                {extras_html}
             </div>
             <div class="footer">
                 This is an automated notification from Flipkart PO Automation Pipeline.
@@ -180,7 +252,7 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
     </html>
     """
 
-    return send_email(subject, body_html, recipient_email)
+    return send_email(subject, body_html, recipient_email, attachments=attachments)
 
 
 def send_failure_mail(step_name: str, error_details: str, recipient_email: str = "") -> bool:

@@ -5,13 +5,16 @@ Flow per pending PO:
   2. POST /vendor/acknowledgement/purchase-order-async -> Acknowledges PO (action: "APPROVE")
   3. GET  /vendor/purchase-order/{po_id} -> Verifies status updated to "approved"
   4. DB   Saves header to 'flipkart_po_logs' and line items to 'flipkart_po_items'
-  5. EXCEL Exports consolidated line items to downloads/Flipkart_POs_{timestamp}.xlsx
+  5. FILE Downloads the PO copy from VendorHub (kept in memory)
+  6. EXCEL Builds a workbook of this run's 'flipkart_po_items' rows (kept in memory)
+
+Nothing is written to local disk; the files are returned as (filename, bytes)
+attachments for the success email.
 """
-import os
+import io
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -23,7 +26,7 @@ log = logging.getLogger(__name__)
 
 PO_DETAIL_URL = f"{config.BASE_URL}/vendor/purchase-order"
 PO_ACK_URL    = f"{config.BASE_URL}/vendor/acknowledgement/purchase-order-async"
-DOWNLOAD_DIR  = Path("downloads")
+PO_DOWNLOAD_URL = f"{config.BASE_URL}/vendor/purchase-order-download"
 
 
 def fetch_po_details(context, po_id: str, csrf_token: str = "") -> dict:
@@ -79,12 +82,11 @@ def acknowledge_po(context, po_id: str, csrf_token: str = "") -> dict:
         return {"status": resp.status, "raw": body}
 
 
-def export_pos_to_excel(all_po_items: list[dict], filename_suffix: str = "") -> Path:
-    """Exports consolidated PO line items to a styled Excel workbook."""
-    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+def export_pos_to_excel(all_po_items: list[dict], filename_suffix: str = "") -> tuple[str, bytes]:
+    """Builds a styled Excel workbook of PO line items in memory; returns (filename, xlsx bytes)."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix_str = f"_{filename_suffix}" if filename_suffix else ""
-    excel_path = DOWNLOAD_DIR / f"Flipkart_POs{suffix_str}_{timestamp}.xlsx"
+    excel_name = f"Flipkart_POs{suffix_str}_{timestamp}.xlsx"
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -158,9 +160,10 @@ def export_pos_to_excel(all_po_items: list[dict], filename_suffix: str = "") -> 
         col_letter = openpyxl.utils.get_column_letter(col[0].column)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
 
-    wb.save(excel_path)
-    log.info("Excel report saved to: %s", excel_path.resolve())
-    return excel_path
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    log.info("Excel report built in memory: %s (%d row(s))", excel_name, len(all_po_items))
+    return excel_name, buffer.getvalue()
 
 
 def build_standard_payload(details: dict, po_id: str) -> dict:
@@ -281,14 +284,17 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         csrf_token: Optional captured CSRF token
 
     Returns:
-        Summary dict of processed PO results.
+        Summary dict of processed PO results. "attachments" holds (filename, bytes)
+        files for the success email; "notes" lists anything that could not be attached.
     """
     if not po_list:
         log.info("No POs to process in Step 3.")
-        return {"processed": 0, "acknowledged": 0, "excel_file": None}
+        return {"processed": 0, "acknowledged": 0, "attachments": [], "notes": [], "payloads": {}}
 
-    all_exported_rows: list[dict] = []
-    processed_count = 0
+    processed_ids: list[str] = []
+    payloads: dict[str, dict] = {}
+    po_copies: list[tuple[str, bytes]] = []
+    notes: list[str] = []
     ack_count = 0
 
     print(f"\n{'=' * 80}")
@@ -305,7 +311,7 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
             log.warning("Skipping PO %s due to missing detail response.", po_id)
             continue
 
-        processed_count += 1
+        processed_ids.append(po_id)
         raw_items = details.get("purchase_order_items", [])
         log.info("PO %s has %d line item(s).", po_id, len(raw_items))
 
@@ -315,12 +321,9 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         # with open(payload_file, "w", encoding="utf-8") as f:
         #     json.dump(details, f, indent=4, ensure_ascii=False)
 
-        # 3. Build standardized B2B payload and save to B2B_Automation -> PDF_Base64
+        # 3. Build standardized payload (header columns for PDF_Base64 + success-email summary)
         std_payload = build_standard_payload(details, po_id)
-        db.save_pdf_base64_payload(po_id, std_payload)
-        # std_payload_file = DOWNLOAD_DIR / f"PO_{po_id}_b2b_payload.json"
-        # with open(std_payload_file, "w", encoding="utf-8") as f:
-        #     json.dump(std_payload, f, indent=4, ensure_ascii=False)
+        payloads[po_id] = std_payload
 
         # 4. Save line items to DB table 'flipkart_po_items'
         db.save_po_items(po_id, raw_items)
@@ -336,68 +339,67 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         else:
             log.warning("Acknowledgement response for PO %s unexpected: %s", po_id, ack_res)
 
-        # 6. (Disabled: File download to local folder commented out as requested)
-        # po_doc_file = download_po_document(context, po_id)
-        # db.update_po_status(po_id, "downloaded")
+        # 6. Download the PO Excel from VendorHub (in memory) and push its Base64 to
+        #    B2B_Automation.PDF_Base64; the parser builds ValidatedOutput from it
+        po_doc = download_po_document(context, po_id, csrf_token=csrf_token)
+        if po_doc:
+            po_copies.append(po_doc)
+            file_name, file_bytes = po_doc
+            if not db.save_pdf_base64_payload(po_id, std_payload, file_name, file_bytes):
+                notes.append(f"PO {po_id} could not be saved to B2B_Automation.PDF_Base64.")
+        else:
+            notes.append(f"PO copy for {po_id} could not be downloaded from VendorHub, so it was not "
+                         f"pushed to B2B_Automation.PDF_Base64. Re-run with --all-db to retry.")
 
-    # 7. (Disabled: Excel report generation commented out as requested)
-    # excel_file = None
-    # if all_exported_rows:
-    #     excel_file = export_pos_to_excel(all_exported_rows)
+    # 7. Excel of everything pushed to flipkart_po_items in this run
+    items_excel = None
+    if processed_ids:
+        try:
+            item_rows = db.get_po_items_for_export(processed_ids)
+            items_excel = export_pos_to_excel(item_rows, filename_suffix="Items")
+        except Exception as e:
+            log.error("Failed to build flipkart_po_items Excel: %s", e)
+            notes.append(f"Line-items Excel could not be generated: {e}")
 
     return {
-        "processed": processed_count,
+        "processed": len(processed_ids),
         "acknowledged": ack_count,
-        "excel_file": None,
+        "attachments": ([items_excel] if items_excel else []) + po_copies,
+        "notes": notes,
+        "payloads": payloads,
     }
 
 
-def download_po_document(context, po_id: str) -> Optional[Path]:
-    """Navigates to PO detail page in browser and clicks the 'Download' button."""
-    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    page = context.new_page()
+def download_po_document(context, po_id: str, csrf_token: str = "") -> Optional[tuple[str, bytes]]:
+    """Downloads the PO Excel from VendorHub and returns (filename, bytes), kept in memory.
+
+    Calls the same endpoint the 'Download' button in the PO list uses, with the
+    logged-in session, so no page navigation or button lookup is involved.
+    """
+    headers = {
+        "Accept":           "*/*",
+        "Referer":          f"{config.BASE_URL}/",
+        "x-requested-with": "XMLHttpRequest",
+    }
+    if csrf_token:
+        headers["x-csrf-token"] = csrf_token
+
     try:
-        po_page_url = f"{config.BASE_URL}/#/operations/po/{po_id}"
-        log.info("Navigating to PO page to click Download button: %s", po_page_url)
-        page.goto(po_page_url, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(3000)
-
-        # Handle any vendor selection modal if prompted
-        try:
-            if page.get_by_text("NEXT", exact=False).is_visible(timeout=2000):
-                page.get_by_text("NEXT", exact=False).click(force=True)
-                page.wait_for_timeout(2000)
-        except Exception:
-            pass
-
-        # Locate the Download button specific to this PO row if in a table, or fallback to first matching Download button
-        download_btn = None
-        try:
-            row = page.get_by_role("row").filter(has_text=po_id)
-            if row.count() > 0 and row.first.get_by_text("Download", exact=True).is_visible(timeout=3000):
-                download_btn = row.first.get_by_text("Download", exact=True)
-            elif page.get_by_text("Download", exact=True).count() > 0:
-                download_btn = page.get_by_text("Download", exact=True).first
-        except Exception:
-            if page.get_by_text("Download", exact=True).count() > 0:
-                download_btn = page.get_by_text("Download", exact=True).first
-
-        if download_btn and download_btn.is_visible(timeout=3000):
-            try:
-                with page.expect_download(timeout=10_000) as download_info:
-                    download_btn.click()
-                download = download_info.value
-                dest_path = DOWNLOAD_DIR / f"PO_{po_id}_{download.suggested_filename}"
-                download.save_as(dest_path)
-                log.info("Successfully downloaded PO file: %s", dest_path)
-                print(f"  [File Downloaded] {dest_path}")
-                return dest_path
-            except Exception as e:
-                log.warning("Download button click warning for PO %s: %s", po_id, e)
-        else:
-            log.info("No Download button found on page for PO %s", po_id)
+        resp = context.request.get(PO_DOWNLOAD_URL, params={"id": po_id}, headers=headers)
+        data = resp.body()
+        if resp.status != 200 or data[:2] != b"PK":  # xlsx files are zip archives
+            log.warning("PO download for %s failed: HTTP %d, %s, %d bytes",
+                        po_id, resp.status, resp.headers.get("content-type", ""), len(data))
+            return None
     except Exception as e:
-        log.warning("Browser download error for PO %s: %s", po_id, e)
-    finally:
-        page.close()
-    return None
+        log.warning("PO download error for %s: %s", po_id, e)
+        return None
+
+    # Content-Disposition: attachment; filename=purchase_order_<PO>.xlsx
+    disposition = resp.headers.get("content-disposition", "")
+    file_name = disposition.split("filename=")[-1].strip('"; ') if "filename=" in disposition else ""
+    if po_id not in file_name:
+        file_name = f"purchase_order_{po_id}.xlsx"
+    log.info("Downloaded PO file %s (%d bytes)", file_name, len(data))
+    print(f"  [File Downloaded] {file_name}")
+    return file_name, data
