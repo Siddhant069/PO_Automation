@@ -381,8 +381,17 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
             if not db.save_pdf_base64_payload(po_id, std_payload, file_name, file_bytes):
                 notes.append(f"PO {po_id} could not be saved to B2B_Automation.PDF_Base64.")
         else:
-            notes.append(f"PO copy for {po_id} could not be downloaded from VendorHub, so it was not "
-                         f"pushed to B2B_Automation.PDF_Base64. Re-run with --all-db to retry.")
+            log.warning("PO copy for %s could not be downloaded directly. Generating fallback Excel from API items...", po_id)
+            try:
+                item_rows = db.get_po_items_for_export([po_id])
+                if item_rows:
+                    fallback_name = f"purchase_order_{po_id}.xlsx"
+                    _, fallback_bytes = export_pos_to_excel(item_rows, filename_suffix=po_id)
+                    db.save_pdf_base64_payload(po_id, std_payload, fallback_name, fallback_bytes)
+                    log.info("Pushed generated fallback Excel for PO %s to B2B_Automation.PDF_Base64.", po_id)
+            except Exception as fb_err:
+                log.error("Failed to generate fallback Excel for PO %s: %s", po_id, fb_err)
+            notes.append(f"PO copy for {po_id} could not be downloaded directly from VendorHub; fallback Excel was generated & pushed to B2B_Automation.PDF_Base64.")
 
     # 7. Excel of everything pushed to flipkart_po_items in this run
     items_excel = None

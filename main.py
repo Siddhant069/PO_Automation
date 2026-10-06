@@ -133,21 +133,29 @@ def main():
                     po_id = po_obj.po_id
                     cursor.execute("SELECT Filename, PurchaseOrderDate, PurchaseOrderExpiryDate, ValidatedOutput FROM PDF_Base64 WHERE csv_filename = %s OR PONumber = %s", (po_id, po_id))
                     rec = cursor.fetchone()
+                    import json as _json
+                    val_out = {}
+                    rec_po_date = ""
+                    rec_exp_date = ""
                     if rec:
-                        import json as _json
-                        # ValidatedOutput is filled later by the parser; until then use this run's payload
-                        val_out = _json.loads(rec.get("ValidatedOutput") or "{}") or step3_res["payloads"].get(po_id, {})
-                        contract_ref_id = step3_res["contracts"].get(po_id, "")
-                        po_summary_for_mailer.append({
-                            "po_id": po_id,
-                            "contract_ref_id": contract_ref_id,
-                            "po_type": step3.CONTRACT_PO_TYPES.get(contract_ref_id, "Unknown"),
-                            "po_date": rec.get("PurchaseOrderDate") or val_out.get("purchase_order_date") or "",
-                            "expiry_date": rec.get("PurchaseOrderExpiryDate") or val_out.get("purchase_order_expiry_date") or "",
-                            "ship_to_location_address": val_out.get("ship_to_location_address") or po_obj.to_site_name or "",
-                            "total_item_qty_in_units": val_out.get("total_item_qty_in_units") or 0,
-                            "order_total_amount_incl_tax": val_out.get("order_total_amount_incl_tax") or po_obj.total_amount or 0.0
-                        })
+                        val_out = _json.loads(rec.get("ValidatedOutput") or "{}")
+                        rec_po_date = rec.get("PurchaseOrderDate") or ""
+                        rec_exp_date = rec.get("PurchaseOrderExpiryDate") or ""
+                    
+                    if not val_out:
+                        val_out = step3_res["payloads"].get(po_id, {})
+                        
+                    contract_ref_id = step3_res["contracts"].get(po_id, "")
+                    po_summary_for_mailer.append({
+                        "po_id": po_id,
+                        "contract_ref_id": contract_ref_id,
+                        "po_type": step3.CONTRACT_PO_TYPES.get(contract_ref_id, "Unknown"),
+                        "po_date": rec_po_date or val_out.get("purchase_order_date") or getattr(po_obj, "order_date", "") or "",
+                        "expiry_date": rec_exp_date or val_out.get("purchase_order_expiry_date") or getattr(po_obj, "expiry_date", "") or "",
+                        "ship_to_location_address": val_out.get("ship_to_location_address") or getattr(po_obj, "to_site_name", "") or "",
+                        "total_item_qty_in_units": val_out.get("total_item_qty_in_units") or getattr(po_obj, "total_pending_qty", 0) or 0,
+                        "order_total_amount_incl_tax": val_out.get("order_total_amount_incl_tax") or getattr(po_obj, "total_amount", 0.0) or 0.0
+                    })
         finally:
             conn.close()
 
