@@ -157,6 +157,8 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
 
     for item in po_details_list:
         po_no = item.get("po_id") or item.get("po_no") or "N/A"
+        contract_ref_id = item.get("contract_ref_id") or "N/A"
+        po_type = item.get("po_type") or "Unknown"
         po_date = item.get("po_date") or item.get("purchase_order_date") or item.get("order_date") or "N/A"
         expiry_date = item.get("expiry_date") or item.get("purchase_order_expiry_date") or "N/A"
         ship_to = item.get("ship_to_location_address") or item.get("to_site_name") or "N/A"
@@ -173,6 +175,8 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
         table_rows_html += f"""
         <tr>
             <td style="padding: 10px; border-bottom: 1px solid #E2E8F0; font-weight: bold; color: #1E293B;">{po_no}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #E2E8F0; color: #475569;">{contract_ref_id}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #E2E8F0; color: #1E293B; font-weight: bold;">{po_type}</td>
             <td style="padding: 10px; border-bottom: 1px solid #E2E8F0; color: #475569;">{po_date}</td>
             <td style="padding: 10px; border-bottom: 1px solid #E2E8F0; color: #475569;">{expiry_date}</td>
             <td style="padding: 10px; border-bottom: 1px solid #E2E8F0; color: #475569;">{ship_to}</td>
@@ -187,7 +191,7 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
         intro_html = "No new Purchase Orders were fetched from Flipkart VendorHub in this run, so no action was taken."
         table_rows_html = """
         <tr>
-            <td colspan="6" style="padding: 15px; text-align: center; color: #64748B;">No new pending POs were found in this run.</td>
+            <td colspan="8" style="padding: 15px; text-align: center; color: #64748B;">No new pending POs were found in this run.</td>
         </tr>
         """
 
@@ -231,6 +235,8 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
                     <thead>
                         <tr>
                             <th>PO Number</th>
+                            <th>Contract Ref ID</th>
+                            <th>PO Type</th>
                             <th>PO Date</th>
                             <th>Expiry Date</th>
                             <th>Ship To Location</th>

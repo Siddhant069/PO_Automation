@@ -137,8 +137,11 @@ def main():
                         import json as _json
                         # ValidatedOutput is filled later by the parser; until then use this run's payload
                         val_out = _json.loads(rec.get("ValidatedOutput") or "{}") or step3_res["payloads"].get(po_id, {})
+                        contract_ref_id = step3_res["contracts"].get(po_id, "")
                         po_summary_for_mailer.append({
                             "po_id": po_id,
+                            "contract_ref_id": contract_ref_id,
+                            "po_type": step3.CONTRACT_PO_TYPES.get(contract_ref_id, "Unknown"),
                             "po_date": rec.get("PurchaseOrderDate") or val_out.get("purchase_order_date") or "",
                             "expiry_date": rec.get("PurchaseOrderExpiryDate") or val_out.get("purchase_order_expiry_date") or "",
                             "ship_to_location_address": val_out.get("ship_to_location_address") or po_obj.to_site_name or "",

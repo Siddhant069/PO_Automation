@@ -28,6 +28,34 @@ PO_DETAIL_URL = f"{config.BASE_URL}/vendor/purchase-order"
 PO_ACK_URL    = f"{config.BASE_URL}/vendor/acknowledgement/purchase-order-async"
 PO_DOWNLOAD_URL = f"{config.BASE_URL}/vendor/purchase-order-download"
 
+# CONTRACT REF ID printed on the PO Excel -> PO type shown in the success email
+CONTRACT_PO_TYPES = {
+    "FKI-OR-01293546": "Hyperlocal / Flipkart Minutes",
+    "FKI-OR-01388640": "National",
+}
+
+
+def extract_contract_ref_id(xlsx_bytes: bytes) -> str:
+    """Reads the value next to the 'CONTRACT REF ID' label in the PO Excel (E14 -> G14 today).
+
+    Scans the header area for the label and returns the first non-empty cell to
+    its right, so a moved or re-merged header still works. Returns "" if absent.
+    """
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+        try:
+            for row in wb.active.iter_rows(min_row=1, max_row=40, max_col=30, values_only=True):
+                for idx, value in enumerate(row):
+                    if isinstance(value, str) and value.strip().upper() == "CONTRACT REF ID":
+                        for right in row[idx + 1:]:
+                            if right not in (None, ""):
+                                return str(right).strip()
+        finally:
+            wb.close()
+    except Exception as e:
+        log.warning("Could not read CONTRACT REF ID from PO Excel: %s", e)
+    return ""
+
 
 def fetch_po_details(context, po_id: str, csrf_token: str = "") -> dict:
     """Fetches full details and line items for a single PO."""
@@ -289,10 +317,11 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
     """
     if not po_list:
         log.info("No POs to process in Step 3.")
-        return {"processed": 0, "acknowledged": 0, "attachments": [], "notes": [], "payloads": {}}
+        return {"processed": 0, "acknowledged": 0, "attachments": [], "notes": [], "payloads": {}, "contracts": {}}
 
     processed_ids: list[str] = []
     payloads: dict[str, dict] = {}
+    contracts: dict[str, str] = {}   # po_id -> CONTRACT REF ID from the PO Excel
     po_copies: list[tuple[str, bytes]] = []
     notes: list[str] = []
     ack_count = 0
@@ -345,6 +374,10 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         if po_doc:
             po_copies.append(po_doc)
             file_name, file_bytes = po_doc
+            contract_ref_id = extract_contract_ref_id(file_bytes)
+            contracts[po_id] = contract_ref_id
+            log.info("PO %s CONTRACT REF ID: %s (%s)", po_id, contract_ref_id or "not found",
+                     CONTRACT_PO_TYPES.get(contract_ref_id, "unknown type"))
             if not db.save_pdf_base64_payload(po_id, std_payload, file_name, file_bytes):
                 notes.append(f"PO {po_id} could not be saved to B2B_Automation.PDF_Base64.")
         else:
@@ -367,6 +400,7 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         "attachments": ([items_excel] if items_excel else []) + po_copies,
         "notes": notes,
         "payloads": payloads,
+        "contracts": contracts,
     }
 
 
