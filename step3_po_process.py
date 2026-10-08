@@ -415,12 +415,13 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
     }
 
 
-def download_po_document(context, po_id: str, csrf_token: str = "") -> Optional[tuple[str, bytes]]:
+def download_po_document(context, po_id: str, csrf_token: str = "", max_retries: int = 3, retry_delay: float = 5.0) -> Optional[tuple[str, bytes]]:
     """Downloads the PO Excel from VendorHub and returns (filename, bytes), kept in memory.
 
-    Calls the same endpoint the 'Download' button in the PO list uses, with the
-    logged-in session, so no page navigation or button lookup is involved.
+    Includes retry logic with delay to handle race conditions when VendorHub generates
+    the document asynchronously immediately after acknowledgement.
     """
+    import time
     headers = {
         "Accept":           "*/*",
         "Referer":          f"{config.BASE_URL}/",
@@ -429,22 +430,26 @@ def download_po_document(context, po_id: str, csrf_token: str = "") -> Optional[
     if csrf_token:
         headers["x-csrf-token"] = csrf_token
 
-    try:
-        resp = context.request.get(PO_DOWNLOAD_URL, params={"id": po_id}, headers=headers)
-        data = resp.body()
-        if resp.status != 200 or data[:2] != b"PK":  # xlsx files are zip archives
-            log.warning("PO download for %s failed: HTTP %d, %s, %d bytes",
-                        po_id, resp.status, resp.headers.get("content-type", ""), len(data))
-            return None
-    except Exception as e:
-        log.warning("PO download error for %s: %s", po_id, e)
-        return None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = context.request.get(PO_DOWNLOAD_URL, params={"id": po_id}, headers=headers)
+            data = resp.body()
+            if resp.status == 200 and data[:2] == b"PK":  # xlsx files are zip archives
+                # Content-Disposition: attachment; filename=purchase_order_<PO>.xlsx
+                disposition = resp.headers.get("content-disposition", "")
+                file_name = disposition.split("filename=")[-1].strip('"; ') if "filename=" in disposition else ""
+                if po_id not in file_name:
+                    file_name = f"purchase_order_{po_id}.xlsx"
+                log.info("Downloaded PO file %s (%d bytes) on attempt %d", file_name, len(data), attempt)
+                print(f"  [File Downloaded] {file_name}")
+                return file_name, data
 
-    # Content-Disposition: attachment; filename=purchase_order_<PO>.xlsx
-    disposition = resp.headers.get("content-disposition", "")
-    file_name = disposition.split("filename=")[-1].strip('"; ') if "filename=" in disposition else ""
-    if po_id not in file_name:
-        file_name = f"purchase_order_{po_id}.xlsx"
-    log.info("Downloaded PO file %s (%d bytes)", file_name, len(data))
-    print(f"  [File Downloaded] {file_name}")
-    return file_name, data
+            log.warning("PO download attempt %d/%d for %s failed: HTTP %d, %s, %d bytes",
+                        attempt, max_retries, po_id, resp.status, resp.headers.get("content-type", ""), len(data))
+        except Exception as e:
+            log.warning("PO download error attempt %d/%d for %s: %s", attempt, max_retries, po_id, e)
+
+        if attempt < max_retries:
+            time.sleep(retry_delay)
+
+    return None
