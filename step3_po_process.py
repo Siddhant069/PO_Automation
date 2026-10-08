@@ -368,8 +368,8 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         else:
             log.warning("Acknowledgement response for PO %s unexpected: %s", po_id, ack_res)
 
-        # 6. Download the PO Excel from VendorHub (in memory) and push its Base64 to
-        #    B2B_Automation.PDF_Base64; the parser builds ValidatedOutput from it
+        # 6. Download the PO Excel from VendorHub (in memory) and push its Base64 +
+        #    ValidatedOutput payload to B2B_Automation.PDF_Base64
         po_doc = download_po_document(context, po_id, csrf_token=csrf_token)
         if po_doc:
             po_copies.append(po_doc)
@@ -387,11 +387,13 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
                 if item_rows:
                     fallback_name = f"purchase_order_{po_id}.xlsx"
                     _, fallback_bytes = export_pos_to_excel(item_rows, filename_suffix=po_id)
+                    fallback_doc = (fallback_name, fallback_bytes)
+                    po_copies.append(fallback_doc)
                     db.save_pdf_base64_payload(po_id, std_payload, fallback_name, fallback_bytes)
-                    log.info("Pushed generated fallback Excel for PO %s to B2B_Automation.PDF_Base64.", po_id)
+                    log.info("Pushed generated fallback Excel for PO %s to B2B_Automation.PDF_Base64 and attached to email.", po_id)
             except Exception as fb_err:
                 log.error("Failed to generate fallback Excel for PO %s: %s", po_id, fb_err)
-            notes.append(f"PO copy for {po_id} could not be downloaded directly from VendorHub; fallback Excel was generated & pushed to B2B_Automation.PDF_Base64.")
+            notes.append(f"PO copy for {po_id} could not be downloaded directly from VendorHub; fallback Excel was generated, attached to email & pushed to B2B_Automation.PDF_Base64.")
 
     # 7. Excel of everything pushed to flipkart_po_items in this run
     items_excel = None
