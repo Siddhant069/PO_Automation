@@ -47,6 +47,7 @@ def perform_login(page: Page, context: BrowserContext) -> bool:
 
     capsolver_key = config.CAPSOLVER_API_KEY
     solved_by_capsolver = False
+    capsolver_err = None
 
     if capsolver_key:
         try:
@@ -63,7 +64,7 @@ def perform_login(page: Page, context: BrowserContext) -> bool:
             print("[Capsolver] CAPTCHA token injected. Submitting login form...")
             # Click SIGN IN button while listening for the response
             with page.expect_response(
-                lambda r: r.url.endswith("/login") and r.request.method == "POST",
+                lambda r: r.url.split("?")[0].rstrip("/").endswith("/login") and r.request.method == "POST",
                 timeout=60_000,
             ) as resp_info:
                 page.get_by_text("SIGN IN", exact=True).click()
@@ -71,13 +72,21 @@ def perform_login(page: Page, context: BrowserContext) -> bool:
             resp = resp_info.value
             solved_by_capsolver = True
         except Exception as e:
+            capsolver_err = e
             print(f"[Capsolver] Automated solving encountered an issue: {e}")
             log.warning("Capsolver automated solve failed: %s", e)
 
     if not solved_by_capsolver:
+        if config.HEADLESS:
+            reason = f"Capsolver error: {capsolver_err}" if capsolver_key else "CAPSOLVER_API_KEY is not configured"
+            raise RuntimeError(
+                f"Automated login failed in headless mode ({reason}). "
+                "Manual CAPTCHA solving is impossible in container/automated environments."
+            )
+
         print("Manual solve required: check 'I'm not a robot' and click SIGN IN in the browser window...")
         with page.expect_response(
-            lambda r: r.url.endswith("/login") and r.request.method == "POST",
+            lambda r: r.url.split("?")[0].rstrip("/").endswith("/login") and r.request.method == "POST",
             timeout=300_000,
         ) as resp_info:
             pass

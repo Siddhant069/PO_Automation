@@ -139,6 +139,14 @@ def inject_recaptcha_token(page: Page, token: str) -> bool:
                             obj.callback(token);
                             return true;
                         }
+                        if (typeof obj.callback === 'string' && typeof window[obj.callback] === 'function') {
+                            window[obj.callback](token);
+                            return true;
+                        }
+                        if (typeof obj['promise-callback'] === 'function') {
+                            obj['promise-callback'](token);
+                            return true;
+                        }
                         for (let k in obj) {
                             if (obj[k] && typeof obj[k] === 'object') {
                                 if (findAndCall(obj[k], depth + 1)) return true;

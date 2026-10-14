@@ -94,7 +94,7 @@ def get_authenticated_context(playwright, force_login: bool = False) -> BrowserC
 
     # ── Fresh interactive login ────────────────────────────────────────────────
     log.info("No valid session — starting login flow.")
-    headless = config.HEADLESS if config.CAPSOLVER_API_KEY else False
+    headless = config.HEADLESS if (config.CAPSOLVER_API_KEY or config.HEADLESS) else False
     browser = playwright.chromium.launch(headless=headless)
     context = browser.new_context()
     page    = context.new_page()
