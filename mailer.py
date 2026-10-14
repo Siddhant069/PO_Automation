@@ -137,20 +137,32 @@ def send_email(subject: str, body_html: str, recipient_email: str = "",
 
 def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: str = "",
                       attachments: Optional[List[Attachment]] = None,
-                      notes: Optional[List[str]] = None) -> bool:
-    """Sends SUCCESS email with detailed PO summary table.
+                      notes: Optional[List[str]] = None,
+                      unacknowledged_pos: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """Sends email with detailed PO summary table and unacknowledged PO section if any.
 
     attachments: (filename, bytes) files to attach (PO copies, line-items Excel).
     notes: warnings shown in the body, e.g. a PO copy that could not be downloaded.
+    unacknowledged_pos: list of POs held and not acknowledged due to amount <= threshold.
     """
-    subject = "SUCCESS - Flipkart PO"
     notes = list(notes or [])
+    unack_list = list(unacknowledged_pos or [])
     attachments, size_note = _fit_attachments(list(attachments or []))
     if size_note:
         notes.append(size_note)
 
-    total_pos = len(po_details_list)
-    
+    ack_count = len(po_details_list)
+    unack_count = len(unack_list)
+
+    if ack_count and unack_count:
+        subject = f"SUCCESS - Flipkart PO: {ack_count} Acknowledged, {unack_count} Held (≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f})"
+    elif ack_count:
+        subject = f"SUCCESS - Flipkart PO ({ack_count} Processed)"
+    elif unack_count:
+        subject = f"ALERT - Flipkart PO: {unack_count} Held (Amount ≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f} - Not Acknowledged)"
+    else:
+        subject = "SUCCESS - Flipkart PO (No New POs)"
+
     table_rows_html = ""
     total_value = 0.0
     total_qty = 0
@@ -185,14 +197,120 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
         </tr>
         """
 
-    intro_html = "All target Purchase Orders have been acknowledged, processed, and details have been logged into the database tables (<code>flipkart_po_logs</code> and <code>B2B_Automation.PDF_Base64</code>)."
-
-    if not table_rows_html:
+    if ack_count and unack_count:
+        status_badge = '<div class="badge" style="background-color: #FEF3C7; color: #92400E;">STATUS: COMPLETED (ACTION REQUIRED / LOW VALUE HOLD)</div>'
+        intro_html = f"The <b>Flipkart PO Workflow</b> completed. <b>{ack_count}</b> PO(s) met the threshold (&gt; ₹{config.PO_AMOUNT_THRESHOLD:,.0f}) and were acknowledged and processed to database/B2B automation. <b>{unack_count}</b> PO(s) were held unacknowledged due to amount ≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f}."
+    elif ack_count:
+        status_badge = '<div class="badge">STATUS: SUCCESS</div>'
+        intro_html = f"The <b>Flipkart PO Workflow</b> ran successfully. All <b>{ack_count}</b> target Purchase Order(s) have been acknowledged, processed, and details logged into the database tables (<code>flipkart_po_logs</code> and <code>B2B_Automation.PDF_Base64</code>)."
+    elif unack_count:
+        status_badge = f'<div class="badge" style="background-color: #FEE2E2; color: #991B1B;">STATUS: HELD (AMOUNT ≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f})</div>'
+        intro_html = f"The <b>Flipkart PO Workflow</b> ran. No POs were acknowledged because all <b>{unack_count}</b> pending PO(s) have order value less than or equal to ₹{config.PO_AMOUNT_THRESHOLD:,.0f} and require manual review."
+    else:
+        status_badge = '<div class="badge">STATUS: SUCCESS</div>'
         intro_html = "No new Purchase Orders were fetched from Flipkart VendorHub in this run, so no action was taken."
-        table_rows_html = """
-        <tr>
-            <td colspan="8" style="padding: 15px; text-align: center; color: #64748B;">No new pending POs were found in this run.</td>
-        </tr>
+
+    if table_rows_html:
+        ack_section_html = f"""
+        <h3 style="margin-top: 24px; color: #1E3A8A;">Processed &amp; Acknowledged PO Details ({ack_count} POs)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>PO Number</th>
+                    <th>Contract Ref ID</th>
+                    <th>PO Type</th>
+                    <th>PO Date</th>
+                    <th>Expiry Date</th>
+                    <th>Ship To Location</th>
+                    <th style="text-align: right;">Total Units</th>
+                    <th style="text-align: right;">Amount</th>
+                </tr>
+            </thead>    
+            <tbody>
+                {table_rows_html}
+            </tbody>
+        </table>
+        """
+    elif unack_list:
+        ack_section_html = f"""
+        <h3 style="margin-top: 24px; color: #1E3A8A;">Processed &amp; Acknowledged PO Details (0 POs)</h3>
+        <p style="color: #64748B; font-size: 13px; font-style: italic;">No POs met the minimum amount threshold (&gt; ₹{config.PO_AMOUNT_THRESHOLD:,.0f}) for acknowledgement in this run.</p>
+        """
+    else:
+        ack_section_html = """
+        <table>
+            <thead>
+                <tr>
+                    <th>PO Number</th>
+                    <th>Contract Ref ID</th>
+                    <th>PO Type</th>
+                    <th>PO Date</th>
+                    <th>Expiry Date</th>
+                    <th>Ship To Location</th>
+                    <th style="text-align: right;">Total Units</th>
+                    <th style="text-align: right;">Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="8" style="padding: 15px; text-align: center; color: #64748B;">No new pending POs were found in this run.</td>
+                </tr>
+            </tbody>
+        </table>
+        """
+
+    unack_section_html = ""
+    if unack_list:
+        unack_rows_html = ""
+        for item in unack_list:
+            po_no = item.get("po_id") or item.get("po_no") or "N/A"
+            po_date = item.get("po_date") or item.get("purchase_order_date") or item.get("order_date") or "N/A"
+            expiry_date = item.get("expiry_date") or item.get("purchase_order_expiry_date") or "N/A"
+            ship_to = item.get("ship_to_location_address") or item.get("to_site_name") or "N/A"
+            qty = item.get("total_item_qty_in_units") or item.get("total_ordered_qty") or 0
+            amount = float(item.get("order_total_amount_incl_tax") or item.get("total_amount") or 0.0)
+
+            unack_rows_html += f"""
+            <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; font-weight: bold; color: #9A3412;">{po_no}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; color: #475569;">{po_date}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; color: #475569;">{expiry_date}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; color: #475569;">{ship_to}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; text-align: right; color: #1E293B;">{qty}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; text-align: right; font-weight: bold; color: #C2410C;">₹{amount:,.2f}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #FED7AA; text-align: center;">
+                    <span style="background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;">
+                        NOT ACKNOWLEDGED (≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f})
+                    </span>
+                </td>
+            </tr>
+            """
+
+        unack_section_html = f"""
+        <div style="margin-top: 32px; background-color: #FFF7ED; border: 1px solid #FDBA74; border-left: 5px solid #EA580C; border-radius: 8px; padding: 18px;">
+            <h3 style="margin: 0 0 6px 0; color: #9A3412; font-size: 16px;">
+                ⚠️ Unacknowledged POs (Amount ≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f}) — {unack_count} PO(s)
+            </h3>
+            <p style="margin: 0 0 14px 0; color: #7C2D12; font-size: 13px;">
+                The following Purchase Order(s) were <b>NOT acknowledged</b> and downstream B2B processing was halted because the order value is less than or equal to ₹{config.PO_AMOUNT_THRESHOLD:,.0f}.
+            </p>
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px; background-color: #FFFFFF; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.06);">
+                <thead>
+                    <tr style="background-color: #FFEDD5; color: #9A3412;">
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #FED7AA;">PO Number</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #FED7AA;">PO Date</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #FED7AA;">Expiry Date</th>
+                        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #FED7AA;">Ship To Location</th>
+                        <th style="padding: 10px; text-align: right; border-bottom: 2px solid #FED7AA;">Units</th>
+                        <th style="padding: 10px; text-align: right; border-bottom: 2px solid #FED7AA;">Amount</th>
+                        <th style="padding: 10px; text-align: center; border-bottom: 2px solid #FED7AA;">Action / Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {unack_rows_html}
+                </tbody>
+            </table>
+        </div>
         """
 
     extras_html = ""
@@ -226,28 +344,12 @@ def send_success_mail(po_details_list: List[Dict[str, Any]], recipient_email: st
                 <h1>Flipkart PO Workflow Report</h1>
             </div>
             <div class="content">
-                <div class="badge">STATUS: SUCCESS</div>
+                {status_badge}
                 <p>Hello,</p>
-                <p>The <b>Flipkart PO Workflow</b> ran successfully. {intro_html}</p>
+                <p>{intro_html}</p>
                 
-                <h3 style="margin-top: 24px; color: #1E3A8A;">Processed PO Details ({total_pos} POs)</h3>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>PO Number</th>
-                            <th>Contract Ref ID</th>
-                            <th>PO Type</th>
-                            <th>PO Date</th>
-                            <th>Expiry Date</th>
-                            <th>Ship To Location</th>
-                            <th style="text-align: right;">Total Units</th>
-                            <th style="text-align: right;">Amount</th>
-                        </tr>
-                    </thead>    
-                    <tbody>
-                        {table_rows_html}
-                    </tbody>
-                </table>
+                {ack_section_html}
+                {unack_section_html}
                 {extras_html}
             </div>
             <div class="footer">

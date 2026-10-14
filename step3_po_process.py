@@ -57,6 +57,20 @@ def extract_contract_ref_id(xlsx_bytes: bytes) -> str:
     return ""
 
 
+def _format_date(dt_raw):
+    if not dt_raw:
+        return ""
+    try:
+        dt_str = str(dt_raw).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(dt_str)
+        return dt.strftime("%d-%m-%Y")
+    except Exception:
+        parts = str(dt_raw)[:10].split("-")
+        if len(parts) == 3 and len(parts[0]) == 4:
+            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        return str(dt_raw)[:10]
+
+
 def fetch_po_details(context, po_id: str, csrf_token: str = "") -> dict:
     """Fetches full details and line items for a single PO."""
     url = f"{PO_DETAIL_URL}/{po_id}"
@@ -317,17 +331,18 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
     """
     if not po_list:
         log.info("No POs to process in Step 3.")
-        return {"processed": 0, "acknowledged": 0, "attachments": [], "notes": [], "payloads": {}, "contracts": {}}
+        return {"processed": 0, "acknowledged": 0, "attachments": [], "notes": [], "payloads": {}, "contracts": {}, "unacknowledged_pos": []}
 
     processed_ids: list[str] = []
     payloads: dict[str, dict] = {}
     contracts: dict[str, str] = {}   # po_id -> CONTRACT REF ID from the PO Excel
     po_copies: list[tuple[str, bytes]] = []
     notes: list[str] = []
+    unacknowledged_pos: list[dict] = []
     ack_count = 0
 
     print(f"\n{'=' * 80}")
-    print(f"  STEP 3: PROCESSING & ACKNOWLEDGING {len(po_list)} PO(s)")
+    print(f"  STEP 3: PROCESSING & ACKNOWLEDGING {len(po_list)} PO(s) [Threshold: > ₹{config.PO_AMOUNT_THRESHOLD:,.0f}]")
     print(f"{'=' * 80}")
 
     for idx, po in enumerate(po_list, 1):
@@ -338,6 +353,45 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         details = fetch_po_details(context, po_id, csrf_token=csrf_token)
         if not details:
             log.warning("Skipping PO %s due to missing detail response.", po_id)
+            continue
+
+        po_amount = float(details.get("total_amount") or getattr(po, "total_amount", 0.0) or 0.0)
+
+        # ── Threshold check: POs with Amount <= threshold are NOT acknowledged ──
+        if po_amount <= config.PO_AMOUNT_THRESHOLD:
+            log.warning("PO %s amount (₹%.2f) is <= %s. Skipping acknowledgement and further flow.",
+                        po_id, po_amount, config.PO_AMOUNT_THRESHOLD)
+            print(f"  [HELD] PO {po_id} Amount ₹{po_amount:,.2f} <= ₹{config.PO_AMOUNT_THRESHOLD:,.0f} — Not acknowledging, halting further flow.")
+
+            db.update_po_status(po_id, "unacknowledged_low_amount")
+
+            order_date_str = _format_date(details.get("order_date")) or getattr(po, "order_date", "") or "N/A"
+            expiry_date_str = _format_date(details.get("expiry_date")) or getattr(po, "expiry_date", "") or "N/A"
+            items_raw = details.get("purchase_order_items") or []
+            total_qty = sum(float(it.get("quantity") or 0.0) for it in items_raw) or getattr(po, "total_pending_qty", 0) or getattr(po, "total_ordered_qty", 0)
+
+            warehouse = details.get("warehouse") or {}
+            ship_to_address_parts = [
+                warehouse.get("name"),
+                warehouse.get("address_line1") or warehouse.get("address1"),
+                warehouse.get("address_line2") or warehouse.get("address2"),
+                warehouse.get("city"),
+                warehouse.get("state"),
+                warehouse.get("postal_code") or warehouse.get("pincode")
+            ]
+            ship_to_address_str = ", ".join(p for p in ship_to_address_parts if p) or getattr(po, "to_site_name", "") or "N/A"
+
+            unacknowledged_pos.append({
+                "po_id": po_id,
+                "contract_ref_id": "N/A",
+                "po_type": "N/A",
+                "po_date": order_date_str,
+                "expiry_date": expiry_date_str,
+                "ship_to_location_address": ship_to_address_str,
+                "total_item_qty_in_units": total_qty,
+                "order_total_amount_incl_tax": po_amount,
+                "reason": f"Amount (₹{po_amount:,.2f}) ≤ ₹{config.PO_AMOUNT_THRESHOLD:,.0f}"
+            })
             continue
 
         processed_ids.append(po_id)
@@ -412,6 +466,7 @@ def process_and_download_pos(context, po_list: list, csrf_token: str = "") -> di
         "notes": notes,
         "payloads": payloads,
         "contracts": contracts,
+        "unacknowledged_pos": unacknowledged_pos,
     }
 
 

@@ -126,11 +126,17 @@ def main():
             ctx.browser.close()
 
         # Build list of processed PO info for success email from B2B_Automation database
+        unack_summary = step3_res.get("unacknowledged_pos", [])
+        unack_ids = {u["po_id"] for u in unack_summary}
+
         conn = db.get_b2b_connection()
         try:
             with conn.cursor() as cursor:
                 for po_obj in po_list:
                     po_id = po_obj.po_id
+                    if po_id in unack_ids:
+                        continue  # Skip unacknowledged POs from the acknowledged table
+
                     cursor.execute("SELECT Filename, PurchaseOrderDate, PurchaseOrderExpiryDate, ValidatedOutput FROM PDF_Base64 WHERE csv_filename = %s OR PONumber = %s", (po_id, po_id))
                     rec = cursor.fetchone()
                     import json as _json
@@ -161,9 +167,10 @@ def main():
 
         # ── Send Success Email Notification ──────────────────────────────
         current_step = "Sending Success Email Notification"
-        print(f"\n[Mailer] Sending SUCCESS notification email with {len(step3_res['attachments'])} attachment(s)...")
+        print(f"\n[Mailer] Sending notification email (Acknowledged: {len(po_summary_for_mailer)}, Unacknowledged/Held: {len(unack_summary)}) with {len(step3_res['attachments'])} attachment(s)...")
         mailer.send_success_mail(
             po_summary_for_mailer,
+            unacknowledged_pos=unack_summary,
             attachments=step3_res["attachments"],
             notes=step3_res["notes"],
         )

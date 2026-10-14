@@ -19,6 +19,7 @@ SESSION_ENC_KEY = os.getenv("SESSION_ENC_KEY", "")
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 CAPSOLVER_API_KEY = os.getenv("CAPSOLVER_API_KEY", "").strip()
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "60"))
+PO_AMOUNT_THRESHOLD = float(os.getenv("PO_AMOUNT_THRESHOLD", "24999"))
 
 TENANT_ID = os.getenv("TENANT_ID", "")
 CLIENT_ID = os.getenv("CLIENT_ID", "")
